@@ -14,6 +14,14 @@ class PyFuse(Operations):
 		self.rootdir = rootdir
 		self.mountpoint = mountpoint
 		self.tempdir = os.path.join("/tmp/", self.mountpoint)
+		'''
+			maps remote file path -> {
+				local_tmp_path, 
+				open_pointers, 
+				is_dirty (not race condition friendly)
+			}
+		'''
+		self.openfiles = {}
 		if not os.path.isdir(self.tempdir):
 			os.mkdir(self.tempdir)
 		try: 
@@ -34,13 +42,17 @@ class PyFuse(Operations):
 		return os.path.join(self.tempdir, 
 					   path if not path.startswith("/") else path[1:])
 
-	def getattr(self, remote_path, fh=None):
+	def getattr(self, path, fh=None):
 		#execute lstat on remote
 		print("getattr")
+		remote_path = self.path_from_root(path)
 		(stdin, stdout, stderr) = self.ssh_client.exec_command(
-			"stat --printf='%D %f %s %X %Y %Z' " + self.path_from_root(remote_path)
+			"stat --printf='%D %f %s %X %Y %Z' " + remote_path
 		)
 		stat_vals  = stdout.read().decode('utf-8')
+		print(f"stats for {remote_path}: {stat_vals}")
+		if len(stat_vals) == 0:
+			return None
 		stat_vals = stat_vals.split(" ")
 		stat_args_to_bases = {
 			"st_dev": 10, 
@@ -64,14 +76,45 @@ class PyFuse(Operations):
 		remote_path = self.path_from_root(path)
 		local_path = self.path_from_temp(path)
 		self.scp_client.get(remote_path, local_path, recursive=True, preserve_times=True)
-		return os.open(local_path, flags)
+		fd = os.open(local_path, flags)
+		if remote_path not in self.openfiles:
+			self.openfiles[remote_path] = {
+				"path_from_temp": local_path, 
+				"is_dirty": False
+			}
+			self.openfiles[remote_path]["num_open"] = self.openfiles[remote_path].get("num_open", 0) + 1
+		return fd
 
 	def read(self, path, size, offset, fh=None):
 		print("read")
 		os.lseek(fh, offset, os.SEEK_SET)
 		return os.read(fh, size)
 
+	def write(self, path, buffer, offset, fh):
+		print("write")
+		os.lseek(fh, offset, os.SEEK_SET)
+		remote_path = self.path_from_root(path)
+		result = os.write(fh, buffer)
+		self.openfiles[remote_path]["is_dirty"] = True
+		return result
 
+	def release(self, path, fh):
+		print("release")
+		remote_path = self.path_from_root(path)
+		if remote_path not in self.openfiles:
+			print(f'remote_path {remote_path} open but missing from openfiles set')
+			raise Exception("failed to release: " + remote_path)
+		local_path = self.openfiles[remote_path]["path_from_temp"]
+		if self.openfiles[remote_path]["is_dirty"] is True:
+			print("Writing updated file to remote")
+			self.scp_client.put(local_path, remote_path=remote_path, recursive=True, preserve_times=True)
+		if self.openfiles[remote_path]["num_open"] == 0:
+			print(f'Removing {remote_path} from local system')
+			del self.openfiles[remote_path]
+			os.remove(local_path)
+		else:
+			self.openfiles[remote_path]["num_open"] -= 1
+	
 	def __del__(self):
 		print("__del__")
 		shutil.rmtree(self.tempdir)
