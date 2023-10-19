@@ -4,6 +4,8 @@ import shutil
 from fuse import FUSE, Operations
 from paramiko import (SSHClient, AutoAddPolicy)
 from scp import SCPClient
+import time
+
 
 username = "altannag"
 host = "c220g5-111024.wisc.cloudlab.us"
@@ -44,13 +46,13 @@ class PyFuse(Operations):
 
 	def getattr(self, path, fh=None):
 		#execute lstat on remote
-		print("getattr")
+		# print("getattr")
 		remote_path = self.path_from_root(path)
 		(stdin, stdout, stderr) = self.ssh_client.exec_command(
 			"stat --printf='%D %f %s %X %Y %Z' " + remote_path
 		)
 		stat_vals  = stdout.read().decode('utf-8')
-		print(f"stats for {remote_path}: {stat_vals}")
+		# print(f"stats for {remote_path}: {stat_vals}")
 		if len(stat_vals) == 0:
 			return None
 		stat_vals = stat_vals.split(" ")
@@ -64,14 +66,14 @@ class PyFuse(Operations):
 		}
 		return dict((key, int(stat_vals[i], base=stat_args_to_bases[key])) for i, key in enumerate(stat_args_to_bases.keys()))
 
-	def readdir(self, remote_path, fh=None):
-		print("readdir")
+	def readdir(self, path, fh=None):
+		# print("readdir")
 		dirs = [".", ".."]
-		dirs += self.sftp_client.listdir(self.path_from_root(remote_path))
+		dirs += self.sftp_client.listdir(self.path_from_root(path))
 		return dirs
 	
 	def open(self, path, flags):
-		print("open")
+		# print("open")
 		#download the file from the remote
 		remote_path = self.path_from_root(path)
 		local_path = self.path_from_temp(path)
@@ -82,16 +84,15 @@ class PyFuse(Operations):
 				"path_from_temp": local_path, 
 				"is_dirty": False
 			}
-			self.openfiles[remote_path]["num_open"] = self.openfiles[remote_path].get("num_open", 0) + 1
+		self.openfiles[remote_path]["num_open"] = self.openfiles[remote_path].get("num_open", 0) + 1
 		return fd
 
 	def read(self, path, size, offset, fh=None):
-		print("read")
 		os.lseek(fh, offset, os.SEEK_SET)
 		return os.read(fh, size)
 
 	def write(self, path, buffer, offset, fh):
-		print("write")
+		# print("write")
 		os.lseek(fh, offset, os.SEEK_SET)
 		remote_path = self.path_from_root(path)
 		result = os.write(fh, buffer)
@@ -102,21 +103,21 @@ class PyFuse(Operations):
 		print("release")
 		remote_path = self.path_from_root(path)
 		if remote_path not in self.openfiles:
-			print(f'remote_path {remote_path} open but missing from openfiles set')
+			# print(f'remote_path {remote_path} open but missing from openfiles set')
 			raise Exception("failed to release: " + remote_path)
 		local_path = self.openfiles[remote_path]["path_from_temp"]
 		if self.openfiles[remote_path]["is_dirty"] is True:
-			print("Writing updated file to remote")
+			# print("Writing updated file to remote")
 			self.scp_client.put(local_path, remote_path=remote_path, recursive=True, preserve_times=True)
-		if self.openfiles[remote_path]["num_open"] == 0:
-			print(f'Removing {remote_path} from local system')
+		if self.openfiles[remote_path]["num_open"] == 1:
+			# print(f'Removing {remote_path} from local system')
 			del self.openfiles[remote_path]
 			os.remove(local_path)
 		else:
 			self.openfiles[remote_path]["num_open"] -= 1
 	
 	def __del__(self):
-		print("__del__")
+		# print("__del__")
 		shutil.rmtree(self.tempdir)
 		self.ssh_client.close()
 
