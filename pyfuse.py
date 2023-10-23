@@ -4,7 +4,7 @@ import shutil
 from fuse import FUSE, Operations
 from paramiko import (SSHClient, AutoAddPolicy)
 from scp import SCPClient
-import time
+from pathlib import Path
 
 
 username = "altannag"
@@ -47,15 +47,6 @@ class PyFuse(Operations):
 	def getattr(self, path, fh=None):
 		#execute lstat on remote
 		# print("getattr")
-		remote_path = self.path_from_root(path)
-		(stdin, stdout, stderr) = self.ssh_client.exec_command(
-			"stat --printf='%D %f %s %X %Y %Z' " + remote_path
-		)
-		stat_vals  = stdout.read().decode('utf-8')
-		# print(f"stats for {remote_path}: {stat_vals}")
-		if len(stat_vals) == 0:
-			return None
-		stat_vals = stat_vals.split(" ")
 		stat_args_to_bases = {
 			"st_dev": 10, 
 			"st_mode": 16, 
@@ -64,8 +55,25 @@ class PyFuse(Operations):
 			"st_mtime": 10, 
 			"st_ctime": 10
 		}
+		remote_path = self.path_from_root(path)
+		if remote_path in self.openfiles:
+			temp_path = self.path_from_temp(path)
+			stat_obj = os.lstat(temp_path)
+			return dict((key, getattr(stat_obj, key)) for key in stat_args_to_bases.keys())
+		
+		(stdin, stdout, stderr) = self.ssh_client.exec_command(
+			"stat --printf='%D %f %s %X %Y %Z' " + remote_path
+		)
+		stat_vals  = stdout.read().decode('utf-8')
+		# print(f"stats for {remote_path}: {stat_vals}")
+		if len(stat_vals) == 0:
+			return None
+		stat_vals = stat_vals.split(" ")
+
 		return dict((key, int(stat_vals[i], base=stat_args_to_bases[key])) for i, key in enumerate(stat_args_to_bases.keys()))
 
+
+	
 	def readdir(self, path, fh=None):
 		# print("readdir")
 		dirs = [".", ".."]
@@ -73,23 +81,37 @@ class PyFuse(Operations):
 		return dirs
 	
 	def open(self, path, flags):
-		# print("open")
+		# print("opening: ", path)
 		#download the file from the remote
 		remote_path = self.path_from_root(path)
 		local_path = self.path_from_temp(path)
-		self.scp_client.get(remote_path, local_path, recursive=True, preserve_times=True)
-		fd = os.open(local_path, flags)
 		if remote_path not in self.openfiles:
+			# print(f"Downloading {remote_path} from remote.")
+			Path(os.path.dirname(local_path)).mkdir(parents=True, exist_ok=True)
+			self.scp_client.get(remote_path, local_path, recursive=True, preserve_times=True)
 			self.openfiles[remote_path] = {
 				"path_from_temp": local_path, 
 				"is_dirty": False
 			}
+			
+		fd = os.open(local_path, flags)
 		self.openfiles[remote_path]["num_open"] = self.openfiles[remote_path].get("num_open", 0) + 1
 		return fd
 
 	def read(self, path, size, offset, fh=None):
+		# print("read")
 		os.lseek(fh, offset, os.SEEK_SET)
 		return os.read(fh, size)
+	
+
+	def truncate(self, path, length, fh=None):
+		# print("truncate: ", fh, path)
+		if(fh is None):
+			fd = os.open(path, os.O_RDWR)
+			os.truncate(fd, length)
+			return
+		os.truncate(fh, length)
+
 
 	def write(self, path, buffer, offset, fh):
 		# print("write")
@@ -100,7 +122,7 @@ class PyFuse(Operations):
 		return result
 
 	def release(self, path, fh):
-		print("release")
+		# print("release")
 		remote_path = self.path_from_root(path)
 		if remote_path not in self.openfiles:
 			# print(f'remote_path {remote_path} open but missing from openfiles set')
