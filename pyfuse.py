@@ -106,8 +106,9 @@ class PyFuse(Operations):
 
 	def truncate(self, path, length, fh=None):
 		# print("truncate: ", fh, path)
-		if(fh is None):
-			fd = os.open(path, os.O_RDWR)
+		if(fh == None):
+			local_path = self.path_from_temp(path)
+			fd = os.open(local_path, os.O_RDWR)
 			os.truncate(fd, length)
 			return
 		os.truncate(fh, length)
